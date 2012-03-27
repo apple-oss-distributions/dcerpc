@@ -154,13 +154,13 @@ Porting Message:  You must provide definitions for the symbols
 /*
 ** Default filetype names.
 */
-#define OBJ_FILETYPE ".@OBJEXT@"
+#define OBJ_FILETYPE ".o"
 
 /*
 ** Commands to invoke C-Preprocessor, C-Compiler etc.
 */
-#define CPP 			"@IDL_CPP@ "
-#define CC_DEF_CMD	"@IDL_CC@ -c @IDL_CFLAGS@"
+#define CPP 			"/usr/bin/xcrun cc -E -x c-header "
+#define CC_DEF_CMD	"/usr/bin/xcrun cc -c  -D_SOCKADDR_LEN -D_GNU_SOURCE -D_REENTRANT -D_POSIX_C_SOURCE=3"
 
 /*
 ** Default suffixes for IDL-generated files.
