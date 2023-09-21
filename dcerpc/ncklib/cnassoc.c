@@ -105,6 +105,7 @@
 #include <comauth.h>    /* Externals for Auth. Services sub-component   */
 #include <cncall.h>     /* NCA connection call service */
 #include <cnassoc.h>
+#include <os/overflow.h>  /* Overflow arithmetic */
 
 #include <dce/rpcexc.h>
 
@@ -2015,7 +2016,7 @@ PRIVATE void rpc__cn_assoc_send_frag
              * Note: this is a copy of rpc__cn_call_local_cancel()
              * with the call to rpc__cn_call_forward_cancel() removed.
              */
-            if (RPC_CALL_IS_CLIENT (((rpc_call_rep_t *) assoc->call_rep)))
+            if (assoc->assoc_flags & RPC_C_CN_ASSOC_CLIENT)
             {
                 /*
                  * Record the cancel that was just detected.
@@ -4139,7 +4140,7 @@ INTERNAL void rpc__cn_assoc_reclaim
 {
     unsigned32          i;
     boolean		shutdown_or_abort = false;
-    rpc_cn_assoc_t      *assoc;
+    rpc_cn_assoc_t      *assoc, *next_assoc;
     unsigned32          st;
 
     RPC_CN_DBG_RTN_PRINTF(rpc__cn_assoc_reclaim);
@@ -4260,6 +4261,15 @@ INTERNAL void rpc__cn_assoc_reclaim
                              */
                             assoc->assoc_flags |= RPC_C_CN_ASSOC_SCANNED;
                         }
+                        
+                        /*
+                         * Get the next association in the list before calling rpc__cn_assoc_acb_dealloc
+                         * to decrement the association reference count. If we hold the last reference
+                         * then rpc__cn_assoc_acb_dealloc will call rpc__list_element_free to return the
+                         * assoc to the rpc_g_cn_assoc_lookaside_list. If the list is already at max capacity,
+                         * the assoc memory will be freed, and RPC_LIST_NEXT will access freed memory.
+                         */
+                        RPC_LIST_NEXT (assoc, next_assoc, rpc_cn_assoc_p_t);
 
                         /*
                          * Done with the shutdown attempt, so decrement the
@@ -4267,10 +4277,14 @@ INTERNAL void rpc__cn_assoc_reclaim
                          * routine.
                          */
                         rpc__cn_assoc_acb_dealloc (assoc);
+                        assoc = next_assoc;
+                    } else {
+                        /* Fetch the next assoc in the list */
+                        RPC_LIST_NEXT (assoc, next_assoc, rpc_cn_assoc_p_t);
+                        assoc = next_assoc;
                     }
 		    if (loop == false && shutdown_or_abort == true)
 			return;
-                    RPC_LIST_NEXT (assoc, assoc, rpc_cn_assoc_p_t);
                 } /* end while (assoc != NULL) */
             } /* end if ((!RPC_CN_LOCAL_ID (...)) */
         } /* end for (i = 0; ... ) */
@@ -4807,6 +4821,7 @@ INTERNAL void rpc__cn_assoc_grp_init
      */
     memset (assoc_grp, 0, sizeof (rpc_cn_assoc_grp_t));
     rpc__cn_gen_local_id (index, &assoc_grp->grp_id);
+    assoc_grp->grp_state.cur_state = RPC_C_ASSOC_GRP_CLOSED;
     assoc_grp->grp_max_assoc = (typeof(assoc_grp->grp_max_assoc))(RPC_C_ASSOC_GRP_MAX_ASSOCS_DEFAULT);
     RPC_COND_INIT (assoc_grp->grp_assoc_wt, rpc_g_global_mutex);
     RPC_CN_STATS_INCR (assoc_grps);
@@ -4860,15 +4875,28 @@ INTERNAL rpc_cn_local_id_t rpc__cn_assoc_grp_create
     unsigned16          old_count;
     unsigned16          new_count;
     unsigned32          i;
+    size_t              nBytes;
 
     RPC_CN_DBG_RTN_PRINTF(rpc__cn_assoc_grp_create);
     CODING_ERROR (st);
 
     /*
-     * Compute the size of the new table.
+     * Compute the size of the new table, checking for
+     * overflow/wrap.
      */
     old_count = rpc_g_cn_assoc_grp_tbl.grp_count;
-    new_count = old_count + RPC_C_ASSOC_GRP_ALLOC_SIZE;
+    if(os_add_overflow(old_count, RPC_C_ASSOC_GRP_ALLOC_SIZE, &new_count)) {
+        *st = rpc_s_cannot_alloc_assoc;
+        RPC_CN_LOCAL_ID_CLEAR (grp_id);
+        return (grp_id);
+    }
+    
+    if (os_mul_overflow(new_count, sizeof(rpc_cn_assoc_grp_t), &nBytes)) {
+        *st = rpc_s_cannot_alloc_assoc;
+        RPC_CN_LOCAL_ID_CLEAR (grp_id);
+        
+        return (grp_id);
+    }
 
     /*
      * First allocate a new association group table larger than the
@@ -4876,7 +4904,7 @@ INTERNAL rpc_cn_local_id_t rpc__cn_assoc_grp_create
      */
     RPC_MEM_ALLOC (new_assoc_grp,
                    rpc_cn_assoc_grp_p_t,
-                   sizeof(rpc_cn_assoc_grp_t) * new_count,
+                   nBytes,
                    RPC_C_MEM_CN_ASSOC_GRP_BLK,
                    RPC_C_MEM_WAITOK);
     if (new_assoc_grp == NULL) {
